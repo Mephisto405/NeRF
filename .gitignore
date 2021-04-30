@@ -1,0 +1,4 @@
+data
+test_results
+__pycache__
+*.npz
