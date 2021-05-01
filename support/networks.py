@@ -189,6 +189,7 @@ class NeRFInterface():
         self.val_iters = 0
         return self.m_val_loss
     
+    
 if __name__ == "__main__":
     import time
     model = NeRF().cuda()
