@@ -27,17 +27,17 @@ if __name__ == "__main__":
     
     # model initialization
     print('Model, dataset, optimizer, and scheduler initialization...')
-    model = NeRF().cuda()
+    model = NeRF(embed=True).cuda()
     device = next(model.parameters()).device
     
     # data initialization
-    images, poses, render_poses, hwf, i_split, near, far = load_blender_data()
+    images, poses, render_poses, hwf, i_split, near, far = load_blender_data(half_res=True)
     
     tr_dataset = NeRFDataset(images, poses, render_poses, hwf, i_split, mode='train', device=device)
     val_dataset = NeRFDataset(images, poses, render_poses, hwf, i_split, mode='val', device=device)
     te_dataset = NeRFDataset(images, poses, render_poses, hwf, i_split, mode='test', device=device)
     
-    BS = 64*64
+    BS = 1024
     tr_dataloader = DataLoader(tr_dataset, batch_size=BS, num_workers=0)
     val_dataloader = DataLoader(val_dataset, batch_size=BS, num_workers=0)
     te_dataloader = DataLoader(te_dataset, batch_size=BS, num_workers=0)
@@ -45,7 +45,7 @@ if __name__ == "__main__":
     # optimizer and scheduler initialization
     lrate = 5e-4
     optimizer = optim.Adam(model.parameters(), lr=lrate, betas=(0.9, 0.999))
-    lrate_decay = 250
+    lrate_decay = 500
     decay_rate = 0.1
     
     # interface initialization

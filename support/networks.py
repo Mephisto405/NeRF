@@ -4,10 +4,12 @@ import torch.nn.functional as F
 
 import numpy as np
 
+from math import pi as PI
+
 
 class NeRF(nn.Module):
     
-    def __init__(self, inc_x=3, inc_d=3, width=256):
+    def __init__(self, inc_x=3, inc_d=3, width=256, embed=True):
         super(NeRF, self).__init__()
         # Implementation according to the paper (Fig. 7)
         """
@@ -23,6 +25,13 @@ class NeRF(nn.Module):
         d = 9: 256 + inc_d -> 128
         d =10: 128         -> 3 (sigmoid)
         """
+        self.embed = embed
+        self.L_x = 10
+        self.L_d = 4
+        if embed:
+            inc_x *= 2*self.L_x + 1
+            inc_d *= 2*self.L_d + 1
+        
         dims = [[inc_x, width], 
                 [width, width], 
                 [width, width], 
@@ -39,7 +48,7 @@ class NeRF(nn.Module):
         for i in range(0,5):
             _inc, _outc = dims[i]
             layers.append(nn.Conv1d(_inc, _outc, 1, bias=True, groups=1))
-            layers.append(nn.ReLU())
+            layers.append(nn.ReLU(inplace=True))
         self.embed_layers = nn.Sequential(*layers)
         
         layers = []
@@ -47,7 +56,7 @@ class NeRF(nn.Module):
             _inc, _outc = dims[i]
             layers.append(nn.Conv1d(_inc, _outc, 1, bias=True, groups=1))
             if i != 8:
-                layers.append(nn.ReLU())
+                layers.append(nn.ReLU(inplace=True))
         self.feat_alpha_layers = nn.Sequential(*layers)
         
         layers = []
@@ -57,13 +66,28 @@ class NeRF(nn.Module):
             if i == len(dims) - 1:
                 layers.append(nn.Sigmoid())
             else:
-                layers.append(nn.ReLU())
+                layers.append(nn.ReLU(inplace=True))
         self.rgb_layers = nn.Sequential(*layers)
+       
+    def pos_embed_layer(self, x, L=4):
+        # x: (B, C, S)
+        exps = torch.tensor([2.0**i for i in range(L)], device=x.device)
+        exps = exps.reshape(1, -1) # (1, L)
+        
+        y = x.permute(0,2,1)[...,None] @ exps # (B, S, C, 1) @ (1, L) = (B, S, C, L)
+        y = torch.cat([torch.sin(PI * y), torch.cos(PI * y)], dim=-1) # (B, S, C, 2*L)
+        y = y.reshape(*(y.shape[:-2]), y.shape[-2]*y.shape[-1]) # (B, S, C*2*L)
+        y = y.permute(0,2,1) # (B, C*2*L, S)
+        
+        return torch.cat([x, y], dim=1)
     
     def forward(self, x):
-        # x: (B, C, H=64, W=64)
+        # x: (B, C, S)
         pos = x[:,:3,...]
         drc = x[:,3:,...]
+        if self.embed:
+            pos = self.pos_embed_layer(pos, L=self.L_x)
+            drc = self.pos_embed_layer(drc, L=self.L_d)
         feat = self.embed_layers(pos)
         
         feat = torch.cat([feat, pos], 1) # skip-connection
