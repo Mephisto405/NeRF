@@ -68,6 +68,7 @@ if __name__ == "__main__":
         nerf_itf.to_train_mode()
         out = nerf_itf.forward(ipt) # (R, 3)
         nerf_itf.backward(out, gt)
+    print('Initial training error: %.3e'%(nerf_itf.m_tr_loss))
     
     # train
     print('Start NeRF training...')
