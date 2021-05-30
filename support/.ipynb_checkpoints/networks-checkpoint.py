@@ -7,24 +7,94 @@ import numpy as np
 from math import pi as PI
 
 
+# Model
+class NeRF(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=True, embed=True):
+        super(NeRF, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        self.embed = embed
+        self.L_x = 10
+        self.L_d = 4
+        if embed:
+            self.input_ch *= 2*self.L_x + 1
+            self.input_ch_views *= 2*self.L_d + 1
+        
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(self.input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + self.input_ch, W) for i in range(D-1)])
+        ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+        self.views_linears = nn.ModuleList([nn.Linear(self.input_ch_views + W, W//2)])
+
+        ### Implementation according to the paper
+        # self.views_linears = nn.ModuleList(
+        #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
+        
+        if use_viewdirs:
+            self.feature_linear = nn.Linear(W, W)
+            self.alpha_linear = nn.Linear(W, 1)
+            self.rgb_linear = nn.Linear(W//2, 3)
+        else:
+            self.output_linear = nn.Linear(W, output_ch)
+            
+    def pos_embed_layer(self, x, L=4):
+        # x: (B, C, S)
+        exps = torch.tensor([2.0**i for i in range(L)], device=x.device)
+        exps = exps.reshape(1, -1) # (1, L)
+        
+        y = x.permute(0,2,1)[...,None] @ exps # (B, S, C, 1) @ (1, L) = (B, S, C, L)
+        y = torch.cat([torch.sin(PI * y), torch.cos(PI * y)], dim=-1) # (B, S, C, 2*L)
+        y = y.reshape(*(y.shape[:-2]), y.shape[-2]*y.shape[-1]) # (B, S, C*2*L)
+        y = y.permute(0,2,1) # (B, C*2*L, S)
+        
+        return torch.cat([x, y], dim=1)
+    
+    def forward(self, x):
+        x = x.permute(0,2,1)
+        input_pts, input_views = torch.split(x, [3, 3], dim=-1)
+        if self.embed:
+            input_pts = self.pos_embed_layer(input_pts.permute(0,2,1), L=self.L_x).permute(0,2,1)
+            input_views = self.pos_embed_layer(input_views.permute(0,2,1), L=self.L_d).permute(0,2,1)
+        h = input_pts
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+
+        alpha = self.alpha_linear(h)
+        feature = self.feature_linear(h)
+        h = torch.cat([feature, input_views], -1)
+
+        for i, l in enumerate(self.views_linears):
+            h = self.views_linears[i](h)
+            h = F.relu(h)
+
+        rgb = self.rgb_linear(h)
+
+        return torch.sigmoid(rgb).permute(0,2,1), F.relu(-alpha).permute(0,2,1)# (R, 3, S+1), (R, 1, S+1)
+
+"""
 class NeRF(nn.Module):
     
     def __init__(self, inc_x=3, inc_d=3, width=256, embed=True):
         super(NeRF, self).__init__()
         # Implementation according to the paper (Fig. 7)
-        """
-        d = 0: inc_x       -> 256
-        d = 1: 256         -> 256
-        d = 2: 256         -> 256
-        d = 3: 256         -> 256
-        d = 4: 256         -> 256
-        d = 5: 256 + inc_x -> 256
-        d = 6: 256         -> 256
-        d = 7: 256         -> 256
-        d = 8: 256         -> 256 + 1 (no act except alpha)
-        d = 9: 256 + inc_d -> 128
-        d =10: 128         -> 3 (sigmoid)
-        """
+        # d = 0: inc_x       -> 256
+        # d = 1: 256         -> 256
+        # d = 2: 256         -> 256
+        # d = 3: 256         -> 256
+        # d = 4: 256         -> 256
+        # d = 5: 256 + inc_x -> 256
+        # d = 6: 256         -> 256
+        # d = 7: 256         -> 256
+        # d = 8: 256         -> 256 + 1 (no act except alpha)
+        # d = 9: 256 + inc_d -> 128
+        # d =10: 128         -> 3 (sigmoid)
+        
         self.embed = embed
         self.L_x = 10
         self.L_d = 4
@@ -99,7 +169,7 @@ class NeRF(nn.Module):
         
         return color, F.relu(alpha)
 
-
+"""
 class NeRFInterface():
     
     def __init__(self, model, optim, loss_func, near, far, model_fine=None):
@@ -177,20 +247,21 @@ class NeRFInterface():
         ipt = torch.cat([pts, rays_d], 1) # (R, 6, S+1)
         color, alpha = self.model(ipt) # (R, 3, S+1), (R, 1, S+1)
         
-        
-        
-        raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+        raw2alpha = lambda raw, dists: 1.-torch.exp(-raw*dists)
         
         dists = z_vals[...,1:] - z_vals[...,:-1]
         dists = torch.cat([dists, torch.Tensor([1e10]).to(batch.device).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
         #dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
-        rgb = torch.sigmoid(color.permute(0,2,1))  # [N_rays, N_samples, 3]
+        rgb = color.permute(0,2,1)  # [N_rays, N_samples, 3]
         alpha = raw2alpha(alpha[:,0,:], dists)  # [N_rays, N_samples]
         # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
         weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=batch.device), 1.-alpha + 1e-10], -1), -1)[:, :-1]
         out = torch.sum(weights[...,None] * rgb, -2)
+        acc_map = torch.sum(weights, -1)
+        
+        out = out + (1.-acc_map[...,None])
         
         """
         # binning

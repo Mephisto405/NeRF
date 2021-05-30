@@ -70,6 +70,22 @@ if __name__ == "__main__":
         nerf_itf.backward(out, gt)
     print('Initial training error: %.3e'%(nerf_itf.m_tr_loss))
     
+    movie_base = os.path.join('./test_results',
+                               'lego_spiral_pp')
+    os.makedirs(movie_base, exist_ok=True)
+
+    result = torch.zeros((len(te_dataset.ipt), 3), device=device)
+    with torch.no_grad():
+        for i, ipt in tqdm(enumerate(te_dataloader), leave=False, ncols=70):
+            nerf_itf.to_eval_mode()
+            out = nerf_itf.forward(ipt) # (R, 3)
+            result[i*BS:min(i*BS+BS, len(result))] = out
+    result = result.cpu().numpy()
+    result = result.reshape(-1, hwf[0], hwf[1], 3)
+    result = (255*np.clip(result,0,1)).astype(np.uint8)
+    imageio.mimwrite(os.path.join(movie_base, 'rgb.mp4'), result, fps=30, quality=8)
+    print('Saved test set.')
+    
     # train
     print('Start NeRF training...')
     N_iters = 200e3
