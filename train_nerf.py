@@ -14,11 +14,15 @@ from torch.utils.data import DataLoader
 
 from load_blender import load_blender_data
 from support.utils import MSE, L1
-from support.datasets import NeRFDataset
 from support.networks import NeRF, NeRFInterface
+from support.datasets import NeRFDataset, NeRFCropDataset
 
 
 if __name__ == "__main__":
+    """
+    python train_nerf.py --config configs/lego.txt
+    """
+    
     random.seed("In-Young Cho @ KAIST")
     np.random.seed(0)
     torch.manual_seed(0)
@@ -28,34 +32,49 @@ if __name__ == "__main__":
     # model initialization
     print('Model, dataset, optimizer, and scheduler initialization...')
     model = NeRF(embed=True).cuda()
+    #model_fine = NeRF(embed=True).cuda()
     device = next(model.parameters()).device
     
     # data initialization
-    images, poses, render_poses, hwf, i_split, near, far = load_blender_data(half_res=True)
+    precrop_iters = 500
+    BS = 1024
     
+    images, poses, render_poses, hwf, i_split, near, far = load_blender_data(half_res=True)
     tr_dataset = NeRFDataset(images, poses, render_poses, hwf, i_split, mode='train', device=device)
+    tr_crop_dataset = NeRFCropDataset(images, poses, render_poses, hwf, i_split, mode='train', device=device,
+                                     num_data=precrop_iters*BS)
     val_dataset = NeRFDataset(images, poses, render_poses, hwf, i_split, mode='val', device=device)
     te_dataset = NeRFDataset(images, poses, render_poses, hwf, i_split, mode='test', device=device)
     
-    BS = 1024
     tr_dataloader = DataLoader(tr_dataset, batch_size=BS, num_workers=0)
+    tr_crop_dataloader = DataLoader(tr_crop_dataset, batch_size=BS, num_workers=0)
     val_dataloader = DataLoader(val_dataset, batch_size=BS, num_workers=0)
     te_dataloader = DataLoader(te_dataset, batch_size=BS, num_workers=0)
     
     # optimizer and scheduler initialization
     lrate = 5e-4
+    #optimizer = optim.Adam(list(model.parameters() + model_fine.parameters()), lr=lrate, betas=(0.9, 0.999))
     optimizer = optim.Adam(model.parameters(), lr=lrate, betas=(0.9, 0.999))
     lrate_decay = 500
     decay_rate = 0.1
     
     # interface initialization
+    #nerf_itf = NeRFInterface(model, optimizer, MSE, near, far, model_fine)
     nerf_itf = NeRFInterface(model, optimizer, MSE, near, far)
+    
+    # pre-processing
+    print('Pre-processing...')
+    for ipt, gt in tqdm(tr_crop_dataloader, leave=False, ncols=70):
+        nerf_itf.to_train_mode()
+        out = nerf_itf.forward(ipt) # (R, 3)
+        nerf_itf.backward(out, gt)
     
     # train
     print('Start NeRF training...')
     N_iters = 200e3
     best_err = 1e10
     start_time = time.time()
+    epoch = 0
     
     while (nerf_itf.get_iters() < N_iters):
         # random permutation 
@@ -63,8 +82,10 @@ if __name__ == "__main__":
         rand_idx = torch.randperm(tr_dataloader.dataset.ipt.shape[0])
         tr_dataloader.dataset.ipt = tr_dataloader.dataset.ipt[rand_idx]
         tr_dataloader.dataset.gt = tr_dataloader.dataset.gt[rand_idx]
+        epoch += 1
         
         # single-epoch training
+        print(f'<-- Epoch {epoch} -->')
         for ipt, gt in tqdm(tr_dataloader, leave=False, ncols=70):
             nerf_itf.to_train_mode()
             out = nerf_itf.forward(ipt) # (R, 3)
@@ -91,7 +112,7 @@ if __name__ == "__main__":
                         print('\tBest error: %.3e'%(best_err))
 
             # test
-            if nerf_itf.get_iters() % 5000 == 0:
+            if nerf_itf.get_iters() % 25000 == 0:
                 movie_base = os.path.join('./test_results',
                                            'lego_spiral_{:06d}'.format(nerf_itf.get_iters()))
                 os.makedirs(movie_base, exist_ok=True)
@@ -107,3 +128,5 @@ if __name__ == "__main__":
                 result = (255*np.clip(result,0,1)).astype(np.uint8)
                 imageio.mimwrite(os.path.join(movie_base, 'rgb.mp4'), result, fps=30, quality=8)
                 print('Saved test set.')
+        
+        print('Training error: %.3e'%(nerf_itf.m_tr_loss))

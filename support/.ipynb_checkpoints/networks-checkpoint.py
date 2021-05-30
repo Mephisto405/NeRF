@@ -102,7 +102,7 @@ class NeRF(nn.Module):
 
 class NeRFInterface():
     
-    def __init__(self, model, optim, loss_func, near, far):
+    def __init__(self, model, optim, loss_func, near, far, model_fine=None):
         """
         Args:
             images: numpy array of shape (# of tr&val&te images, H, W, RGBA)
@@ -112,6 +112,7 @@ class NeRFInterface():
             i_split: indices of datasets (i.e. [[0,...,99], [100,...,199], [200,...,399]])
         """
         self.model = model
+        self.model_fine = model_fine
         self.optim = optim
         self.loss_func = loss_func
         
@@ -129,10 +130,14 @@ class NeRFInterface():
     
     def to_train_mode(self):
         self.model.train()
+        if self.model_fine is not None:
+            self.model_fine.train()
         self.iters += 1
     
     def to_eval_mode(self):
         self.model.eval()
+        if self.model_fine is not None:
+            self.model_fine.eval()
         self.val_iters += 1
     
     def forward(self, batch):
@@ -143,17 +148,18 @@ class NeRFInterface():
             out (tensor): (R, 3)
         """
         self.model.zero_grad()
+        if self.model_fine is not None:
+            self.model_fine.zero_grad()
         
         # binning
         N_samples = 64
-        #ts = torch.linspace(0.0, 1.0, N_samples+1, device=batch.device)[:-1]
         ts = torch.linspace(0.0, 1.0, N_samples+1, device=batch.device) # (S+1)
-        ts = self.near + ts * (self.far - self.near)
         
         # jittering
-        deltas = torch.rand(batch.shape[0], len(ts), device=batch.device)
+        deltas = torch.rand(batch.shape[0], len(ts), device=batch.device) / N_samples
         ts = ts.expand(batch.shape[0], -1)
         ts = ts + deltas # (R, S+1)
+        ts = self.near + ts * (self.far - self.near)
         
         # position sampling for stochastic quadrature
         o, d = batch[:,0,:], batch[:,1,:] # (R, 3)
@@ -174,18 +180,23 @@ class NeRFInterface():
         out = torch.sum(weights[:,None,:] * color[...,:-1], -1) # (R, 3)
         
         # white background
-        out += (1 - torch.sum(weights, -1)[...,None]) 
+        out += (1 - torch.sum(weights, -1)[...,None])
+        
+        # hierarchical sampling
+        N_importance = 128
         
         return out
     
-    def backward(self, out, gt):
+    def backward(self, out, gt, out_fine=None):
         """
         Args:
             out (tensor): (R, 3)
             gt (tensor): (R, 3)
         """
         # back. prop.
-        loss = self.loss_func(out, gt)
+        loss = self.loss_func(out, gt) 
+        if self.model_fine is not None:
+            loss += self.loss_func(out_fine, gt) 
         loss.backward()
         
         # error handling        
@@ -197,6 +208,10 @@ class NeRFInterface():
         actual = nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip)
         if actual > clip:
             print("Clipped gradients %f -> %f"%(clip, actual))
+        if self.model_fine is not None:
+            actual = nn.utils.clip_grad_norm_(self.model_fine.parameters(), max_norm=clip)
+            if actual > clip:
+                print("Clipped gradients %f -> %f"%(clip, actual))
         
         # logging
         self.m_tr_loss = loss if self.m_tr_loss is None else (self.m_tr_loss * (self.iters - 1) + loss) / self.iters
