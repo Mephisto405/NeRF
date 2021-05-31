@@ -9,7 +9,7 @@ class NeRFDataset(Dataset):
         tr_images = np.stack([images[i] for i in i_tr])
         val_images = np.stack([images[i] for i in i_val])
         tr_poses = np.stack([poses[i] for i in i_tr])
-        val_poses = np.stack([poses[i] for i in i_tr])
+        val_poses = np.stack([poses[i] for i in i_val])
         self.H, self.W, self.focal = hwf
         self.mode = mode
         

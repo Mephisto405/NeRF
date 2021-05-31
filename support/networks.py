@@ -210,7 +210,7 @@ class NeRFInterface():
             self.model_fine.eval()
         self.val_iters += 1
     
-    def forward(self, batch):
+    def forward(self, rays_o, rays_d, view_dirs):
         """
         Args:
             batch (tensor): (R, 2=o+d, 3)
@@ -222,8 +222,69 @@ class NeRFInterface():
             self.model_fine.zero_grad()
         
         N_samples = 64
-        N_rays = batch.shape[0]
+        N_rays = rays_o.shape[0]
+        assert N_rays == 1024, N_rays
         near, far = self.near, self.far
+        batch = rays_o
+        
+        t_vals = torch.linspace(0., 1., steps=N_samples, device=batch.device)
+        z_vals = near * (1.-t_vals) + far * (t_vals)
+
+        z_vals = z_vals.expand([N_rays, N_samples])
+
+        # get intervals between samples
+        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        upper = torch.cat([mids, z_vals[...,-1:]], -1)
+        lower = torch.cat([z_vals[...,:1], mids], -1)
+        # stratified samples in those intervals
+        t_rand = torch.rand(z_vals.shape, device=batch.device)
+
+        z_vals = lower + (upper - lower) * t_rand
+
+        pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
+        pts = pts.permute(0,2,1)
+        rays_d = rays_d[...,None].expand(rays_d.shape[0], rays_d.shape[1], pts.shape[-1])
+        view_dirs = view_dirs[...,None].expand(rays_d.shape[0], rays_d.shape[1], pts.shape[-1])
+        
+        ipt = torch.cat([pts, view_dirs], 1)
+        color, alpha = self.model(ipt) # (R, 3, S+1), (R, 1, S+1)
+        
+        raw2alpha = lambda raw, dists: 1.-torch.exp(-raw*dists)
+        
+        dists = z_vals[...,1:] - z_vals[...,:-1]
+        dists = torch.cat([dists, torch.Tensor([1e10]).to(batch.device).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
+
+        dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
+
+        rgb = color.permute(0,2,1)  # [N_rays, N_samples, 3]
+        alpha = raw2alpha(alpha[:,0,:], dists)  # [N_rays, N_samples]
+        weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=batch.device), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+        out = torch.sum(weights[...,None] * rgb, -2)
+        acc_map = torch.sum(weights, -1)
+        
+        out = out + (1.-acc_map[...,None])
+        
+        return out
+    
+   # def forward(self, rays_o, rays_d, view_dirs):
+    def forward2(self, batch):
+        """
+        Args:
+            batch (tensor): (R, 2=o+d, 3)
+        Returns:
+            out (tensor): (R, 3)
+        """
+        self.model.zero_grad()
+        if self.model_fine is not None:
+            self.model_fine.zero_grad()
+        
+        N_samples = 64
+        #N_rays = rays_o.shape[0]
+        #assert N_rays == 1024, N_rays
+        N_rays = batch.shape[0]
+        assert N_rays == 1024, N_rays
+        near, far = self.near, self.far
+        #batch = rays_o
         rays_o, rays_d = batch[:,0,:], batch[:,1,:]
         
         t_vals = torch.linspace(0., 1., steps=N_samples, device=batch.device)
@@ -243,8 +304,10 @@ class NeRFInterface():
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
         pts = pts.permute(0,2,1)
         rays_d = rays_d[...,None].expand(rays_d.shape[0], rays_d.shape[1], pts.shape[-1])
+        #view_dirs = view_dirs[...,None].expand(rays_d.shape[0], rays_d.shape[1], pts.shape[-1])
         
         ipt = torch.cat([pts, rays_d], 1) # (R, 6, S+1)
+        #ipt = torch.cat([pts, view_dirs], 1)
         color, alpha = self.model(ipt) # (R, 3, S+1), (R, 1, S+1)
         
         raw2alpha = lambda raw, dists: 1.-torch.exp(-raw*dists)
@@ -328,7 +391,7 @@ class NeRFInterface():
                 print("Clipped gradients %f -> %f"%(clip, actual))
         
         # logging
-        self.m_tr_loss = loss if self.m_tr_loss is None else (self.m_tr_loss * (self.iters - 1) + loss) / self.iters
+        self.m_tr_loss = loss #if self.m_tr_loss is None else (self.m_tr_loss * (self.iters - 1) + loss) / self.iters
         
         # optimization
         self.optim.step()
